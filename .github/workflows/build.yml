@@ -1,0 +1,96 @@
+name: Build Reader APK
+
+# Repo te shudhu ei file (.github/workflows/build.yml) ar project er ZIP file rakhte hobe.
+# ZIP upload/replace korle automatic APK build hoye GitHub Release e publish hoy.
+on:
+  push:
+    paths:
+      - '*.zip'
+      - '**/*.zip'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-reader
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract project ZIP
+        run: |
+          set -e
+          ZIP=$(find . -maxdepth 3 -name '*.zip' -not -path './.git/*' | head -n 1)
+          if [ -z "$ZIP" ]; then
+            echo "::error::Repo te kono .zip file paoa jayni. Project ZIP ta upload koro."
+            exit 1
+          fi
+          echo "Using ZIP: $ZIP"
+          SRC="$RUNNER_TEMP/src"
+          rm -rf "$SRC" && mkdir -p "$SRC"
+          unzip -q -o "$ZIP" -d "$SRC"
+          SETTINGS=$(find "$SRC" -maxdepth 3 \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) -not -path '*/__MACOSX/*' | head -n 1)
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::ZIP er moddhe settings.gradle.kts paoa jayni."
+            exit 1
+          fi
+          PROJECT_DIR=$(dirname "$SETTINGS")
+          echo "Project dir: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK packages
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then SDKM="$(command -v sdkmanager)"; fi
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+
+      - name: Build signed release APK
+        run: |
+          cd "$PROJECT_DIR"
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PversionCode=${{ github.run_number }} \
+            -PgithubRepo=${{ github.repository }}
+
+      - name: Collect APK
+        run: |
+          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/release" -name '*.apk' | head -n 1)
+          if [ -z "$APK" ]; then echo "::error::APK paoa jayni"; exit 1; fi
+          cp "$APK" "Reader-v1.0.${{ github.run_number }}.apk"
+          ls -la *.apk
+
+      - name: Upload artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reader-APK
+          path: Reader-v1.0.${{ github.run_number }}.apk
+
+      - name: Publish GitHub Release (app update er jonno)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Reader v1.0.${{ github.run_number }}
+          body: |
+            Reader v1.0.${{ github.run_number }}
+            Commit: ${{ github.sha }}
+          files: Reader-v1.0.${{ github.run_number }}.apk
+          make_latest: 'true'
